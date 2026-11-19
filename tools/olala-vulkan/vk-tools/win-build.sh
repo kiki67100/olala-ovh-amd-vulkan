@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Windows natif (MSVC + Ninja) du miroir C:\olala\llama.cpp-olala-vulkan.
+# Build Windows natif (MSVC + Ninja) du miroir $OLALA_WIN_ROOT\llama.cpp-olala-vulkan.
 #
 # Usage : win-build.sh [vk|cpu|all] [cible ...]
 #   vk  -> build-vk  (GGML_VULKAN=ON)      cpu -> build-cpu (CPU seul, AVX2)

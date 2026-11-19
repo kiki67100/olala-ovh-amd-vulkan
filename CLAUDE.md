@@ -7,7 +7,7 @@ Réponds en français. Doc complète : [docs/olala-vulkan.md](docs/olala-vulkan.
 ## Règles
 - **Ne jamais modifier ni recompiler `~/olala/llama.cpp-olala`** : fork CPU en production.
 - **Ports 7860/8080 interdits** (GUI + llama-server CPU en service) ; Vulkan utilise 7861 (GUI) et 8081.
-- Ne pas toucher à `C:\Users\la_te\.lmstudio`. Demander avant toute installation sous Windows.
+- Ne pas toucher au dossier LM Studio (`%USERPROFILE%\.lmstudio`). Demander avant toute installation sous Windows.
 - Commits locaux sur `vulkan-olala`, **pas de push** sans accord. Pas d'identité git configurée :
   `git -c user.name=... -c user.email=...`.
 - Disque C: presque plein (~10 Go libres) : pas de copies ni de builds superflus.
@@ -16,8 +16,11 @@ Réponds en français. Doc complète : [docs/olala-vulkan.md](docs/olala-vulkan.
 
 ## Environnement
 - WSL2 ne voit pas la RX 6600 (pas de pilote) → build/exécution GPU en natif Windows via
-  `tools/olala-vulkan/vk-tools/win-*.sh` (miroir `C:\olala\llama.cpp-olala-vulkan`, remis à
+  `tools/olala-vulkan/vk-tools/win-*.sh` (miroir `%OLALA_WIN_ROOT%\llama.cpp-olala-vulkan`, défaut
+  `C:\olala`, remis à
   `origin/vulkan-olala` à chaque build ; `WIP=1` pour inclure le non-commité).
+- Tous les chemins viennent de `tools/olala-vulkan/config.sh` (variables `OLALA_*`) : ne jamais
+  écrire de chemin personnel en dur ; vérifier `olala status` et `win-build.sh` après modification.
 - WSL (mode NAT) ne joint pas les ports Windows : interroger 8081/7861 via `powershell.exe`.
 - Tests de justesse Vulkan possibles sous WSL avec lavapipe (voir la doc), sans GPU.
 - Arrêter la GUI (`olala stop`) avant un build Windows (DLL verrouillées).

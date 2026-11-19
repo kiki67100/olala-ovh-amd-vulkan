@@ -126,8 +126,10 @@ Markdown rendering with syntax highlighting, and token and speed statistics.
 python tools\olala-vulkan\gui\app.py --open
 ```
 
-It serves `http://localhost:7861` and starts `llama-server` on port 8081.
-**Edit the paths at the top of `app.py`** (`BIN`, `MODELS`) for your machine.
+It serves `http://localhost:7861` and starts `llama-server` on port 8081. By default it expects
+`C:\olala\llama.cpp-olala-vulkan\build-vk\bin\llama-server.exe` and the models in `C:\olala\models\`.
+Override with `OLALA_WIN_ROOT`, `OLALA_LLAMA_SERVER` or `OLALA_MODELS_DIR`.
+On Windows, `tools\olala-vulkan\gui\lancer.bat` does the same with a double-click.
 
 ### Validate
 
@@ -168,8 +170,13 @@ the GUI from a WSL terminal:
 - `olala`, `olala q8`, `olala stop` and `olala status` to run the chat;
 - `win-build.sh`, `win-test.sh`, `win-bench.sh` and `win-validate.sh` to build, test and benchmark.
 
-They contain **paths specific to the author's machine** (`C:\olala\…`, the Python install, the WSL
-home). Adapt them before use. Full walkthrough: [docs/olala-vulkan.md](docs/olala-vulkan.md) (French).
+No path is hard-coded. Everything comes from `tools/olala-vulkan/config.sh`:
+- `OLALA_WIN_ROOT` (default `C:\olala`): Windows working folder (mirror + builds, `models\`, `gui-vulkan\`);
+- `OLALA_PY_W`: Windows Python, found automatically through `py.exe`;
+- `OLALA_RESULTS`: test and benchmark results;
+- `OLALA_MODEL`: model used by tests and benchmarks.
+
+Full walkthrough: [docs/olala-vulkan.md](docs/olala-vulkan.md) (French).
 
 ### Known limitations
 
@@ -319,8 +326,10 @@ réflexion, un rendu Markdown avec coloration du code, et des statistiques de to
 python tools\olala-vulkan\gui\app.py --open
 ```
 
-Elle sert `http://localhost:7861` et lance `llama-server` sur le port 8081.
-**Adapter les chemins en haut de `app.py`** (`BIN`, `MODELS`) à votre machine.
+Elle sert `http://localhost:7861` et lance `llama-server` sur le port 8081. Par défaut, elle attend
+`C:\olala\llama.cpp-olala-vulkan\build-vk\bin\llama-server.exe` et les modèles dans `C:\olala\models\`.
+Surcharger avec `OLALA_WIN_ROOT`, `OLALA_LLAMA_SERVER` ou `OLALA_MODELS_DIR`.
+Sous Windows, `tools\olala-vulkan\gui\lancer.bat` fait la même chose en double-cliquant.
 
 ### Validation
 
@@ -363,8 +372,13 @@ les tests et la GUI en natif Windows :
 - `olala`, `olala q8`, `olala stop` et `olala status` pour le chat ;
 - `win-build.sh`, `win-test.sh`, `win-bench.sh` et `win-validate.sh` pour compiler, tester et mesurer.
 
-Ils contiennent des **chemins propres à la machine de l'auteur** (`C:\olala\…`, l'installation de
-Python, le home WSL). À adapter avant usage. Guide complet : [docs/olala-vulkan.md](docs/olala-vulkan.md).
+Aucun chemin n'est écrit en dur. Tout vient de `tools/olala-vulkan/config.sh` :
+- `OLALA_WIN_ROOT` (défaut `C:\olala`) : dossier de travail Windows (miroir + builds, `models\`, `gui-vulkan\`) ;
+- `OLALA_PY_W` : Python Windows, trouvé automatiquement via `py.exe` ;
+- `OLALA_RESULTS` : résultats des tests et benchs ;
+- `OLALA_MODEL` : modèle utilisé par les tests et benchs.
+
+Guide complet : [docs/olala-vulkan.md](docs/olala-vulkan.md).
 
 ### Limites connues
 

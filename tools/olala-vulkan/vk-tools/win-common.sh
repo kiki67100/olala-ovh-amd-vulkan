@@ -1,16 +1,17 @@
 # Bibliotheque commune (sourcee par win-*.sh). Pilote Windows natif depuis WSL.
-# Variables surchargeables par l'environnement.
+# Chemins : voir ../config.sh (OLALA_WIN_ROOT, OLALA_RESULTS, OLALA_MODEL...).
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../config.sh"
 
-WIN_ROOT_W='C:\olala'
-WIN_ROOT_L=/mnt/c/olala
-SRC_W="${SRC_W:-C:\\olala\\llama.cpp-olala-vulkan}"
-SRC_L="${SRC_L:-/mnt/c/olala/llama.cpp-olala-vulkan}"
-MODEL_W="${MODEL_W:-C:\\olala\\models\\Olala-v1.0-mini-7A1B-q5_k_m.gguf}"
-TMP_W='C:\olala\tmp'
-TMP_L=/mnt/c/olala/tmp
-VCVARS='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+WIN_ROOT_W="$OLALA_WIN_ROOT_W"
+WIN_ROOT_L="$OLALA_WIN_ROOT_L"
+SRC_W="${SRC_W:-$OLALA_SRC_W}"
+SRC_L="${SRC_L:-$OLALA_SRC_L}"
+MODEL_W="${MODEL_W:-$OLALA_MODELS_W\\$OLALA_MODEL}"
+TMP_W="$OLALA_TMP_W"
+TMP_L="$OLALA_TMP_L"
+VCVARS="${VCVARS:-C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat}"
 TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_DIR="${RESULTS_DIR:-/home/kevin/olala/vk-tools/results}"  # hors du dépôt (gros)
+RESULTS_DIR="${RESULTS_DIR:-$OLALA_RESULTS}"  # hors du dépôt (gros)
 mkdir -p "$TMP_L" "$RESULTS_DIR"
 
 # Preambule de tout .bat : PATH (cmake/ninja winget) + VULKAN_SDK (les process
@@ -19,13 +20,15 @@ _bat_preamble() {
 cat <<'EOF'
 @echo off
 set "WGP=%LOCALAPPDATA%\Microsoft\WinGet\Packages"
-set "PATH=%WGP%\Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe\cmake-4.4.4-windows-x86_64\bin;%WGP%\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe;%LOCALAPPDATA%\Microsoft\WinGet\Links;C:\Program Files\CMake\bin;%PATH%"
+set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;C:\Program Files\CMake\bin;%PATH%"
+for /d %%d in ("%WGP%\Ninja-build.Ninja_*") do set "PATH=%%~d;%PATH%"
+for /d %%d in ("%WGP%\Kitware.CMake_*") do for /d %%e in ("%%~d\cmake-*") do set "PATH=%%~e\bin;%PATH%"
 if not defined VULKAN_SDK for /d %%d in (C:\VulkanSDK\*) do set "VULKAN_SDK=%%d"
 if defined VULKAN_SDK set "PATH=%VULKAN_SDK%\Bin;%PATH%"
 EOF
 }
 
-# run_bat <contenu> : ecrit un .bat (CRLF) dans C:\olala\tmp et l'execute via cmd.exe.
+# run_bat <contenu> : ecrit un .bat (CRLF) dans $TMP_W et l'execute via cmd.exe.
 # Code retour = errorlevel du .bat.
 run_bat() {
     local name="run_$$_$RANDOM.bat"
@@ -52,7 +55,7 @@ stamp() { date +%Y%m%d-%H%M%S; }
 # WIP=1 : applique en plus les modifications NON commitees du clone WSL (git diff HEAD +
 #         fichiers non suivis), pour tester un shader avant commit.
 BRANCH="${BRANCH:-vulkan-olala}"
-WSL_CLONE="${WSL_CLONE:-/home/kevin/olala/llama.cpp-olala-vulkan}"
+WSL_CLONE="${WSL_CLONE:-$OLALA_REPO}"
 win_pull() {
     run_bat "cd /d $SRC_W || exit /b 1
 git fetch -q origin || exit /b 1

@@ -5,18 +5,65 @@ import http.client, json, os, signal, subprocess, sys, threading, time, webbrows
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN = r"C:\olala\llama.cpp-olala-vulkan\build-vk\bin\llama-server.exe"
+# Dossier Windows de travail (même convention que config.sh) : surcharger avec OLALA_WIN_ROOT.
+WIN_ROOT = os.environ.get("OLALA_WIN_ROOT", r"C:\olala")
+BIN = os.environ.get("OLALA_LLAMA_SERVER",
+                     os.path.join(WIN_ROOT, "llama.cpp-olala-vulkan", "build-vk", "bin", "llama-server.exe"))
+MODELS_DIR = os.environ.get("OLALA_MODELS_DIR", os.path.join(WIN_ROOT, "models"))
 # nom -> (fichier, options de placement). q5 tient entièrement en VRAM (8 Go) ;
 # q8 (6,9 Go) non : --fit place automatiquement une partie des experts MoE sur le CPU.
 MODELS = {
-    "q5_k_m": (r"C:\olala\models\Olala-v1.0-mini-7A1B-q5_k_m.gguf", ["-ngl", "99"]),
-    "q8_0-safe2": (r"C:\olala\models\Olala-v1.0-mini-7A1B-q8_0-safe2.gguf", ["-fit", "on", "-t", "6"]),
+    "q5_k_m": (os.path.join(MODELS_DIR, "Olala-v1.0-mini-7A1B-q5_k_m.gguf"), ["-ngl", "99"]),
+    "q8_0-safe2": (os.path.join(MODELS_DIR, "Olala-v1.0-mini-7A1B-q8_0-safe2.gguf"), ["-fit", "on", "-t", "6"]),
 }
 LLAMA_PORT, GUI_PORT = 8081, 7861
 CTX = int(os.environ.get("OLALA_CTX", "32768"))
 LOG = os.path.join(HERE, "llama-server.log")
 
 state = {"model": None, "status": "stopped", "proc": None}
+
+
+def _kill_on_close_job():
+    """Job Object Windows « kill on close » : llama-server meurt avec ce processus Python,
+    même si la fenêtre est fermée ou le processus tué (pas de serveur orphelin en VRAM)."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.OpenProcess.restype = wintypes.HANDLE
+
+    class BASIC(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rt", "wt", "ot")]
+
+    class EXT(ctypes.Structure):
+        _fields_ = [("Basic", BASIC), ("Io", IO), ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    job = k32.CreateJobObjectW(None, None)
+    info = EXT()
+    info.Basic.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not job or not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        return None
+
+    def assign(pid):
+        h = k32.OpenProcess(0x0101, False, pid)  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
+        if h:
+            k32.AssignProcessToJobObject(job, h)
+            k32.CloseHandle(h)
+    return assign
+
+
+_job_assign = _kill_on_close_job()
 lock = threading.Lock()
 
 
@@ -56,9 +103,11 @@ def start_model(name):
         state["proc"] = subprocess.Popen(cmd, stdout=open(LOG, "w", encoding="utf-8"),
                                          stderr=subprocess.STDOUT,
                                          creationflags=subprocess.CREATE_NO_WINDOW)
+        if _job_assign:
+            _job_assign(state["proc"].pid)
     for _ in range(600):
         if state["proc"].poll() is not None:
-            state["status"] = "error (voir C:\\olala\\gui-vulkan\\llama-server.log)"
+            state["status"] = f"error (voir {LOG})"
             return
         if healthy() and state["proc"].poll() is None:
             state["status"] = "ready"
@@ -129,9 +178,20 @@ class H(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+class Server(ThreadingHTTPServer):
+    # Sous Windows, SO_REUSEADDR permettrait de se lier à un port déjà pris : on l'enlève.
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+
+
 def main():
     first = next((a for a in sys.argv[1:] if a in MODELS), "q5_k_m")
-    srv = ThreadingHTTPServer(("127.0.0.1", GUI_PORT), H)  # échoue avant de lancer le modèle si 7861 est pris
+    try:
+        srv = Server(("127.0.0.1", GUI_PORT), H)
+    except OSError:  # déjà lancé : on ouvre juste la page
+        print(f"Olala GUI Vulkan tourne déjà : http://localhost:{GUI_PORT}")
+        webbrowser.open(f"http://localhost:{GUI_PORT}")
+        return
     threading.Thread(target=start_model, args=(first,), daemon=True).start()
     print(f"Olala GUI Vulkan : http://localhost:{GUI_PORT}  (Ctrl+C pour quitter)", flush=True)
     if "--open" in sys.argv:

@@ -34,7 +34,19 @@ C:\olala\llama.cpp-olala-vulkan\build-vk\bin\llama-server.exe ^
 Ports : 7861 (GUI Vulkan) et 8081 (llama-server Vulkan). Les ports 7860/8080 sont réservés à la GUI
 et au llama-server CPU de `~/olala` et ne sont jamais touchés.
 
-## Arborescence
+## Configuration des chemins
+
+Aucun chemin n'est écrit en dur : tout vient de `tools/olala-vulkan/config.sh`.
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `OLALA_WIN_ROOT` | `C:\olala` | dossier Windows : miroir + builds, `models\`, `gui-vulkan\`, `tmp\` |
+| `OLALA_RESULTS` | `<parent du dépôt>/vk-tools/results` | résultats tests/bench |
+| `OLALA_PY_W` | trouvé via `py.exe`, sinon `where python` | Python Windows utilisé par la GUI |
+| `OLALA_MODEL` | `Olala-v1.0-mini-7A1B-q5_k_m.gguf` | modèle des tests/bench |
+| `OLALA_LLAMA_SERVER`, `OLALA_MODELS_DIR`, `OLALA_CTX` | dérivés / 32768 | surcharges propres à la GUI (`app.py`) |
+
+## Arborescence (valeurs par défaut)
 
 | Emplacement | Rôle |
 |---|---|
@@ -70,7 +82,7 @@ Options cmake : `-G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_US
 Build Vulkan sous WSL (compilation et tests de justesse sans GPU, via lavapipe) :
 
 ```bash
-export VULKAN_SDK=/home/kevin/olala/tools/vksdk/1.4.363.1/x86_64 PATH=$VULKAN_SDK/bin:$PATH
+export VULKAN_SDK=<dossier-du-SDK-LunarG>/x86_64 PATH=$VULKAN_SDK/bin:$PATH
 cmake -B build-vk -DGGML_VULKAN=ON -DLLAMA_USE_PREBUILT_UI=OFF -DCMAKE_BUILD_TYPE=Release \
       -DVulkan_LIBRARY=/usr/lib/x86_64-linux-gnu/libvulkan.so.1
 cmake --build build-vk -j8
