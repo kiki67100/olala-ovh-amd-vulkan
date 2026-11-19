@@ -705,6 +705,27 @@ struct vk_op_gated_delta_net_push_constants {
     uint32_t K;
 };
 
+// Olala Mamba3-MIMO (offsets / strides in floats)
+struct vk_op_mamba3_mimo_push_constants {
+    uint32_t pdyn_off, pdyn_s;
+    uint32_t pstat_off, pstat_s;
+    uint32_t s_in_off, s_in_s;
+    uint32_t D_qk, R, D_v, H, n_ang;
+    uint32_t T, n_seqs;
+    uint32_t off_K, off_V, off_A, n_embd_s;
+    uint32_t s_out_off;
+    float eps, a_floor;
+};
+
+// Olala geodesic residual (offsets / strides in floats)
+struct vk_op_geodesic_push_constants {
+    uint32_t n, ne1, ne2, nr;
+    uint32_t x_off, sx1, sx2, sx3;
+    uint32_t g_off, sg1, sg2, sg3;
+    uint32_t d_off, sd1, sd2, sd3;
+    float inv_depth;
+};
+
 struct vk_op_ssm_scan_push_constants {
     uint32_t nb02, nb03, nb12, nb13;
     uint32_t nb21, nb22, nb31;

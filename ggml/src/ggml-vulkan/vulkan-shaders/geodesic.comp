@@ -1,0 +1,84 @@
+#version 450
+
+// Olala geodesic residual (GGML_OP_GEODESIC), one workgroup per row.
+// Semantic reference: ggml_compute_forward_geodesic_f32 (ggml-cpu/ops.cpp).
+
+#extension GL_EXT_control_flow_attributes : require
+
+layout(constant_id = 0) const uint BLOCK_SIZE = 256;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer X  { float x[];  };
+layout(binding = 1) readonly buffer G  { float g[];  };
+layout(binding = 2) readonly buffer Sc { float sc[]; };
+layout(binding = 3) readonly buffer Bi { float bi[]; };
+layout(binding = 4) writeonly buffer D { float d[];  };
+
+layout(push_constant) uniform PushConstants {
+    uint n; uint ne1; uint ne2; uint nr;
+    uint x_off; uint sx1; uint sx2; uint sx3;
+    uint g_off; uint sg1; uint sg2; uint sg3;
+    uint d_off; uint sd1; uint sd2; uint sd3;
+    float inv_depth;
+};
+
+shared float red0[BLOCK_SIZE];
+shared float red1[BLOCK_SIZE];
+
+void reduce2() {
+    barrier();
+    [[unroll]] for (uint s = BLOCK_SIZE/2; s > 0; s >>= 1) {
+        if (gl_LocalInvocationID.x < s) {
+            red0[gl_LocalInvocationID.x] += red0[gl_LocalInvocationID.x + s];
+            red1[gl_LocalInvocationID.x] += red1[gl_LocalInvocationID.x + s];
+        }
+        barrier();
+    }
+}
+
+void main() {
+    const uint ir  = gl_WorkGroupID.y*gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+    if (ir >= nr) {
+        return; // uniform per workgroup
+    }
+    const uint i1 = ir % ne1, i2 = (ir/ne1) % ne2, i3 = ir/(ne1*ne2);
+    const uint xr = x_off + i1*sx1 + i2*sx2 + i3*sx3;
+    const uint gr = g_off + i1*sg1 + i2*sg2 + i3*sg3;
+    const uint dr = d_off + i1*sd1 + i2*sd2 + i3*sd3;
+
+    float xx = 0.0, xg = 0.0;
+    for (uint i = tid; i < n; i += BLOCK_SIZE) {
+        const float xv = x[xr + i];
+        xx += xv*xv;
+        xg += xv*g[gr + i];
+    }
+    red0[tid] = xx;
+    red1[tid] = xg;
+    reduce2();
+    const float x_norm_sq = max(red0[0], 1e-12);
+    const float coef      = red1[0]/x_norm_sq;
+    barrier();
+
+    float pp = 0.0;
+    for (uint i = tid; i < n; i += BLOCK_SIZE) {
+        const float gp = g[gr + i] - coef*x[xr + i];
+        pp += gp*gp;
+    }
+    red0[tid] = pp;
+    red1[tid] = 0.0;
+    reduce2();
+
+    const float pi4      = 0.785398163;
+    const float tan_norm = max(sqrt(red0[0]), 1e-8);
+    const float xn       = sqrt(x_norm_sq);
+    float theta = min(tan_norm/max(xn, 1e-6), pi4);
+    theta = min((theta*sc[0] + bi[0])*inv_depth, pi4);
+    const float c = cos(theta);
+    const float s = sin(theta)*xn/tan_norm;
+
+    for (uint i = tid; i < n; i += BLOCK_SIZE) {
+        d[dr + i] = x[xr + i]*c + (g[gr + i] - coef*x[xr + i])*s;
+    }
+}

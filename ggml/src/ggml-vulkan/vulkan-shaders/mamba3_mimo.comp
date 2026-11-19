@@ -1,0 +1,265 @@
+#version 450
+
+// Fused Olala Mamba3-MIMO mixer core (GGML_OP_MAMBA3_MIMO, result mode).
+// Semantic reference: ggml_compute_forward_mamba3_mimo (ggml-cpu/ops.cpp),
+// structure follows the serial CUDA kernel (ggml-cuda/mamba3-mimo.cu).
+//
+// One workgroup per (head, seq), serial over the tokens of the sequence.
+// Thread t owns state row p = t / DS and the columns d = t % DS + DS*j, so the
+// state lives in registers (f32) for the whole sequence. The q.S contraction
+// is reduced over the DS threads of a row through shared memory (no subgroup
+// operations needed).
+
+#extension GL_EXT_control_flow_attributes : require
+
+layout(constant_id = 0) const uint WG_SIZE = 256;
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#define MAX_R      8
+#define MAX_DPT    64     // state columns per thread
+#define MAX_RDQK   1024   // R*D_qk
+#define MAX_RDV    512    // R*D_v
+#define MAX_ANG    64
+
+layout(binding = 0) readonly buffer PDyn  { float pdyn[];  };
+layout(binding = 1) readonly buffer PStat { float pstat[]; };
+layout(binding = 2) readonly buffer Bias  { float bias[];  };
+layout(binding = 3) readonly buffer Mxz   { float mxz[];   };
+layout(binding = 4) readonly buffer MimoO { float mimo_o[]; };
+layout(binding = 5) readonly buffer Norms { float norms[]; };
+layout(binding = 6) readonly buffer Misc  { float misc[];  };
+layout(binding = 7) readonly buffer SIn   { float s_in[];  };
+layout(binding = 8) writeonly buffer Dst  { float dst[];   };
+
+layout(push_constant) uniform PushConstants {
+    uint pdyn_off;  uint pdyn_s;     // misalignment offset / token stride (floats)
+    uint pstat_off; uint pstat_s;
+    uint s_in_off;  uint s_in_s;     // seq stride (floats)
+    uint D_qk; uint R; uint D_v; uint H; uint n_ang;
+    uint T; uint n_seqs;
+    uint off_K; uint off_V; uint off_A; uint n_embd_s;
+    uint s_out_off;                  // start of the new state in dst (floats)
+    float eps; float a_floor;
+};
+
+shared float kb[2*MAX_RDQK];   // k (double buffered: current / previous token)
+shared float qb[MAX_RDQK];
+shared float vb[2*MAX_RDV];
+shared float zb[MAX_RDV];
+shared float cs[MAX_ANG];
+shared float sn[MAX_ANG];
+shared float angs[MAX_ANG];
+shared float rms[2*MAX_R];
+shared float red[WG_SIZE];
+shared float part[WG_SIZE*MAX_R];
+
+const float PI = 3.14159265358979323846;
+
+float softplus(float x) {
+    return max(x, 0.0) + log(exp(-abs(x)) + 1.0);
+}
+
+float wrap_angle(float a) {
+    return a - 6.28318530717958647692*roundEven(a*0.15915494309189533577);
+}
+
+void main() {
+    const uint h   = gl_WorkGroupID.x;
+    const uint seq = gl_WorkGroupID.y;
+    const uint tid = gl_LocalInvocationID.x;
+
+    const uint DS   = WG_SIZE / D_v;              // threads per state row
+    const uint p    = tid / DS;                   // state row owned by this thread
+    const uint ds   = tid % DS;
+    const uint n_d  = (D_qk + DS - 1) / DS;       // state columns per thread
+    const uint SD   = D_qk*D_v;
+    const uint half_ = D_qk/2;
+    const uint quarter = D_qk/4;
+    const bool row_ok = p < D_v;
+
+    const uint s_in_base  = s_in_off + seq*s_in_s;
+    const uint s_out_base = s_out_off + seq*n_embd_s;
+
+    // state rows in registers
+    float S[MAX_DPT];
+    [[unroll]] for (uint j = 0; j < MAX_DPT; ++j) {
+        S[j] = 0.0;
+        const uint d = ds + DS*j;
+        if (j < n_d && row_ok && d < D_qk) {
+            S[j] = s_in[s_in_base + h*SD + p*D_qk + d];
+        }
+    }
+    for (uint i = tid; i < n_ang; i += WG_SIZE) {
+        angs[i] = s_in[s_in_base + off_A + h*n_ang + i];
+    }
+    // previous token's k/v from the cache
+    uint prv = 1;
+    for (uint j = tid; j < R*D_qk; j += WG_SIZE) {
+        kb[prv*R*D_qk + j] = s_in[s_in_base + off_K + h*R*D_qk + j];
+    }
+    for (uint j = tid; j < R*D_v; j += WG_SIZE) {
+        vb[prv*R*D_v + j] = s_in[s_in_base + off_V + h*R*D_v + j];
+    }
+    barrier();
+
+    const float D_h = misc[H + h];
+    // threads per B/C group in the rms reduction (power of two, R in {1,2,4,8})
+    const uint n_groups = 2*R;
+    const uint tpg = WG_SIZE / n_groups;
+
+    for (uint t = 0; t < T; ++t) {
+        const uint tok = seq*T + t;
+        const uint cur = prv ^ 1;
+
+        const uint ps = pstat_off + tok*pstat_s + h*(2*D_v + 3);
+        const uint pd = pdyn_off + tok*pdyn_s;
+
+        const float dt    = softplus(pstat[ps + 2*D_v + 0] + misc[h]);
+        const float a     = min(-softplus(pstat[ps + 2*D_v + 1]), -a_floor);
+        const float alpha = exp(a*dt);
+        const float trap  = 1.0/(1.0 + exp(-pstat[ps + 2*D_v + 2]));
+        const float beta  = (1.0 - trap)*dt*alpha;
+        const float gamma = trap*dt;
+
+        for (uint i = tid; i < n_ang; i += WG_SIZE) {
+            const float an = wrap_angle(angs[i] + tanh(pdyn[pd + 2*R*D_qk + i])*PI*dt);
+            angs[i] = an;
+            cs[i] = cos(an);
+            sn[i] = sin(an);
+        }
+
+        // rms of the 2R groups of B/C
+        {
+            const uint g  = tid / tpg;
+            const uint gl = tid % tpg;
+            float s = 0.0;
+            if (g < n_groups) {
+                for (uint d = gl; d < D_qk; d += tpg) {
+                    const float x = pdyn[pd + g*D_qk + d];
+                    s += x*x;
+                }
+            }
+            red[tid] = s;
+            barrier();
+            for (uint st = tpg/2; st > 0; st >>= 1) {
+                if (gl < st) {
+                    red[tid] += red[tid + st];
+                }
+                barrier();
+            }
+            if (gl == 0 && g < n_groups) {
+                rms[g] = 1.0/sqrt(red[tid]/float(D_qk) + eps);
+            }
+            barrier();
+        }
+
+        // operands: k (current buffer), q, v (current buffer), z
+        for (uint j = tid; j < 2*R*D_qk; j += WG_SIZE) {
+            const uint g = j / D_qk;
+            const uint d = j % D_qk;
+            const uint src = pd + g*D_qk;
+            const uint w   = (g < R ? 0 : D_qk);
+            const uint b   = h*2*R*D_qk + g*D_qk;
+            const float sc = rms[g];
+            float o;
+            if (d < quarter) {
+                const float v0 = (pdyn[src + d]*sc)*norms[w + d] + bias[b + d];
+                const float v2 = (pdyn[src + d + half_]*sc)*norms[w + d + half_] + bias[b + d + half_];
+                o = v0*cs[d] - v2*sn[d];
+            } else if (d >= half_ && d < half_ + quarter) {
+                const uint i = d - half_;
+                const float v0 = (pdyn[src + i]*sc)*norms[w + i] + bias[b + i];
+                const float v2 = (pdyn[src + d]*sc)*norms[w + d] + bias[b + d];
+                o = v0*sn[i] + v2*cs[i];
+            } else {
+                o = (pdyn[src + d]*sc)*norms[w + d] + bias[b + d];
+            }
+            if (g < R) {
+                kb[cur*R*D_qk + j] = o;
+            } else {
+                qb[j - R*D_qk] = o;
+            }
+        }
+        for (uint j = tid; j < R*D_v; j += WG_SIZE) {
+            const uint pp = j % D_v;
+            vb[cur*R*D_v + j] = pstat[ps + D_v + pp]*mxz[h*2*R*D_v + j];
+            zb[j]             = pstat[ps + pp]*mxz[h*2*R*D_v + R*D_v + j];
+        }
+        barrier();
+
+        // state update and q.S partial sums
+        float acc[MAX_R];
+        float vc[MAX_R];
+        float vp[MAX_R];
+        [[unroll]] for (uint r = 0; r < MAX_R; ++r) {
+            acc[r] = 0.0;
+            vc[r] = 0.0;
+            vp[r] = 0.0;
+            if (r < R && row_ok) {
+                vc[r] = vb[cur*R*D_v + r*D_v + p];
+                vp[r] = vb[prv*R*D_v + r*D_v + p];
+            }
+        }
+        if (row_ok) {
+            [[unroll]] for (uint j = 0; j < MAX_DPT; ++j) {
+                const uint d = ds + DS*j;
+                if (j < n_d && d < D_qk) {
+                    float c_acc = 0.0, p_acc = 0.0;
+                    [[unroll]] for (uint r = 0; r < MAX_R; ++r) {
+                        if (r < R) {
+                            c_acc += vc[r]*kb[cur*R*D_qk + r*D_qk + d];
+                            p_acc += vp[r]*kb[prv*R*D_qk + r*D_qk + d];
+                        }
+                    }
+                    const float s = alpha*S[j] + beta*p_acc + gamma*c_acc;
+                    S[j] = s;
+                    [[unroll]] for (uint r = 0; r < MAX_R; ++r) {
+                        if (r < R) {
+                            acc[r] += s*qb[r*D_qk + d];
+                        }
+                    }
+                }
+            }
+        }
+        [[unroll]] for (uint r = 0; r < MAX_R; ++r) {
+            if (r < R) {
+                part[r*WG_SIZE + tid] = acc[r];
+            }
+        }
+        barrier();
+
+        if (row_ok && ds == 0) {
+            float yp = 0.0;
+            for (uint r = 0; r < R; ++r) {
+                float o = 0.0;
+                for (uint k = 0; k < DS; ++k) {
+                    o += part[r*WG_SIZE + tid + k];
+                }
+                o += D_h*vc[r];
+                const float zv = zb[r*D_v + p];
+                yp += mimo_o[h*R*D_v + r*D_v + p]*o*(zv/(1.0 + exp(-zv)));
+            }
+            dst[(tok*H + h)*D_v + p] = yp;
+        }
+        barrier();
+        prv = cur;
+    }
+
+    // new state: S, k/v of the last token, angles
+    [[unroll]] for (uint j = 0; j < MAX_DPT; ++j) {
+        const uint d = ds + DS*j;
+        if (j < n_d && row_ok && d < D_qk) {
+            dst[s_out_base + h*SD + p*D_qk + d] = S[j];
+        }
+    }
+    for (uint j = tid; j < R*D_qk; j += WG_SIZE) {
+        dst[s_out_base + off_K + h*R*D_qk + j] = kb[prv*R*D_qk + j];
+    }
+    for (uint j = tid; j < R*D_v; j += WG_SIZE) {
+        dst[s_out_base + off_V + h*R*D_v + j] = vb[prv*R*D_v + j];
+    }
+    for (uint i = tid; i < n_ang; i += WG_SIZE) {
+        dst[s_out_base + off_A + h*n_ang + i] = angs[i];
+    }
+}

@@ -1424,7 +1424,7 @@ static std::vector<uint32_t> get_fa_spec_constants(const vk_fa_pipeline_state& s
     };
 }
 
-static bool ggml_vk_matmul_shmem_support(const vk_device& device, const std::vector<uint32_t>& warptile, bool mul_mat_id, ggml_type src0_type) {
+static bool ggml_vk_matmul_shmem_support(const vk_device& device, const std::vector<uint32_t>& warptile, bool mul_mat_id, ggml_type src0_type, bool force_fp32 = false) {
 
     uint32_t lut_size = 0;
     switch (src0_type) {
@@ -1467,7 +1467,7 @@ static bool ggml_vk_matmul_shmem_support(const vk_device& device, const std::vec
     const bool intel_shmem_stride_pad_zero = device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support &&
                                               device->driver_id == vk::DriverId::eIntelProprietaryWindows;
     const uint32_t bank_conflict_offset = intel_shmem_stride_pad_zero ? 0 : (device->coopmat_support ? 8 : 1);
-    const uint32_t type_size = device->fp16 ? sizeof(ggml_fp16_t) : sizeof(float);
+    const uint32_t type_size = device->fp16 && !force_fp32 ? sizeof(ggml_fp16_t) : sizeof(float);
     const uint32_t warps = warptile[0] / warptile[10];
 
     const uint32_t load_bufs = (warptile[1] + warptile[2]) * (warptile[3] + bank_conflict_offset) * type_size;
@@ -2734,6 +2734,45 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             }
             #undef SPV_DOT2
             #undef SPV_DOT2_F16ACC
+
+            // [TAG_GGML_PREC] fp32 shared-memory variants of the quant x f32 matmuls, for a src1 that must not be
+            // converted to f16 (activations beyond the half range, see ggml_vk_mul_mat_src1_hp)
+            if (!device->coopmat2 && !device->coopmat_support) {
+                auto filter_tc_fp32 = [&](const std::vector<vk_tile_config>& configs, ggml_type type, bool is_id) {
+                    std::vector<vk_tile_config> result;
+                    for (const auto & tc : filter_tc(configs, type, is_id)) {
+                        if (ggml_vk_matmul_shmem_support(device, tc.warptile, is_id, type, true)) {
+                            result.push_back(tc);
+                        }
+                    }
+                    return result;
+                };
+                for (const auto type : non_lut_quant_types) {
+                    auto tc = filter_tc_fp32(tc_mmq, type, false);
+                    if (!tc.empty()) {
+                        spec_fn_t qs = [&, type_a=type](const std::vector<uint32_t>& wt, bool a) { return ggml_vk_mul_mm_spec_quant(wt, a, (uint32_t)type_a); };
+                        create_mm_pipelines({type, GGML_TYPE_F32, false, false, true}, tc, "matmul_quant_f32_fp32", matmul_quant_f32_fp32_len, matmul_quant_f32_fp32_data,
+                            sizeof(vk_mat_mat_push_constants), 3, qs, false, false, 0);
+                    }
+                    if (device->subgroup_ballot && device->subgroup_require_full_support && subgroup_min_size_16) {
+                        auto tci = filter_tc_fp32(tc_mmqid, type, true);
+                        if (!tci.empty()) {
+                            spec_fn_t qs = [&, type_a=type](const std::vector<uint32_t>& wt, bool a) { return ggml_vk_mul_mm_spec_quant(wt, a, (uint32_t)type_a); };
+                            create_mm_pipelines({type, GGML_TYPE_F32, true, false, true}, tci, "matmul_id_subgroup_quant_f32_fp32",
+                                matmul_id_subgroup_quant_f32_fp32_len, matmul_id_subgroup_quant_f32_fp32_data,
+                                sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count, qs, false, true, mul_mat_subgroup_size);
+                        }
+                    } else {
+                        auto tci = filter_tc_fp32(tc_mmqid, type, true);
+                        if (!tci.empty()) {
+                            spec_fn_t qs = [&, type_a=type](const std::vector<uint32_t>& wt, bool a) { return ggml_vk_mul_mm_spec_quant(wt, a, (uint32_t)type_a); };
+                            create_mm_pipelines({type, GGML_TYPE_F32, true, false, true}, tci, "matmul_id_quant_f32_fp32",
+                                matmul_id_quant_f32_fp32_len, matmul_id_quant_f32_fp32_data,
+                                sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count, qs, false, false, 0);
+                        }
+                    }
+                }
+            }
         } else {
             // FP32-only fallback path
             sg_create({GGML_TYPE_F32, GGML_TYPE_F32, false, false}, tc_mm, "matmul_f32_f32", matmul_f32_f32_fp32_len, matmul_f32_f32_fp32_data, sizeof(vk_mat_mat_push_constants), 3);
@@ -3651,6 +3690,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     ggml_vk_create_pipeline(device, device->pipeline_rwkv_wkv6_f32, "rwkv_wkv6_f32", rwkv_wkv6_f32_len, rwkv_wkv6_f32_data, "main", 7, sizeof(vk_op_rwkv_wkv6_push_constants), {1, 1, 1}, {device->subgroup_size}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_rwkv_wkv7_f32, "rwkv_wkv7_f32", rwkv_wkv7_f32_len, rwkv_wkv7_f32_data, "main", 8, sizeof(vk_op_rwkv_wkv7_push_constants), {1, 1, 1}, {device->subgroup_size}, 1);
+
+    ggml_vk_create_pipeline(device, device->pipeline_mamba3_mimo_f32, "mamba3_mimo_f32", mamba3_mimo_f32_len, mamba3_mimo_f32_data, "main", 9, sizeof(vk_op_mamba3_mimo_push_constants), {1, 1, 1}, {256}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_geodesic_f32, "geodesic_f32", geodesic_f32_len, geodesic_f32_data, "main", 5, sizeof(vk_op_geodesic_push_constants), {1, 1, 1}, {256}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_gated_linear_attn_f32, "gated_linear_attn_f32", gated_linear_attn_f32_len, gated_linear_attn_f32_data, "main", 6, sizeof(vk_op_gated_linear_attn_push_constants), {1, 1, 1}, {}, 1);
 
@@ -5973,8 +6015,22 @@ static bool ggml_vk_get_mul_mat_mat_f16acc(ggml_backend_vk_context * ctx, ggml_t
     return ctx->device->fp16 && prec == GGML_PREC_DEFAULT;
 }
 
+// [TAG_GGML_PREC] src1 precision hint of a MUL_MAT / MUL_MAT_ID (op_params[3]) at least BF16 on a quantized src0:
+// src1 must not be quantized to q8_1 (fp16 block scales) nor converted to f16 (activations beyond the half range,
+// e.g. Olala). Uses f32 operands instead (fp32 shared-memory matmuls, f32 matrix-vector kernels).
+static bool ggml_vk_mul_mat_src1_hp(const ggml_tensor * dst) {
+    const int32_t prec = dst->op_params[3];
+    return (prec == GGML_PREC_F32 || prec == GGML_PREC_BF16) && ggml_is_quantized(dst->src[0]->type) &&
+           dst->src[1]->type == GGML_TYPE_F32;
+}
+
 static const std::vector<vk_matmul_pipeline_pair>* ggml_vk_get_mul_mat_mat_pipeline_map(
-        ggml_backend_vk_context * ctx, ggml_type src0_type, ggml_type src1_type, ggml_prec prec, bool mul_mat_id = false) {
+        ggml_backend_vk_context * ctx, ggml_type src0_type, ggml_type src1_type, ggml_prec prec, bool mul_mat_id = false, bool fp32 = false) {
+    if (fp32) {
+        vk_matmul_pipeline_key key{src0_type, src1_type, mul_mat_id, false, true};
+        auto it = ctx->device->pipeline_matmul.find(key);
+        return it == ctx->device->pipeline_matmul.end() || it->second.empty() ? nullptr : &it->second;
+    }
     bool f16acc = ggml_vk_get_mul_mat_mat_f16acc(ctx, src0_type, src1_type, prec);
     vk_matmul_pipeline_key key{src0_type, src1_type, mul_mat_id, f16acc};
     auto it = ctx->device->pipeline_matmul.find(key);
@@ -6327,19 +6383,24 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
     // Prefer the int8 MMQ path (quantize src1 to q8_1) whenever a matching pipeline exists.
     // The pipeline lookup returns nullptr for types without a q8_1 pipeline (e.g. RDNA4-skipped
     // quants), in which case coopmat1 falls back to the f16 B-type quant matmul below.
-    bool quantize_y = (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
+    // [TAG_GGML_PREC] f32 src1 operands (fp32 shared memory) when the hint asks for it and the pipelines exist
+    const std::vector<vk_matmul_pipeline_pair>* mmp_hp = ctx->device->fp16 && ggml_vk_mul_mat_src1_hp(dst) && ggml_vk_dim01_contiguous(src1) && !x_non_contig
+        ? ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_F32, GGML_PREC_F32, false, true) : nullptr;
+
+    bool quantize_y = !ggml_vk_mul_mat_src1_hp(dst) && (ctx->device->integer_dot_product || ctx->device->coopmat_int_support) &&
                       src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && (ne11 * ne10) % 4 == 0;
 
     // Check for mmq first
-    const std::vector<vk_matmul_pipeline_pair>* mmp_map = quantize_y ? ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_Q8_1, (ggml_prec)dst->op_params[0]) : nullptr;
-    if (mmp_map == nullptr) {
+    const std::vector<vk_matmul_pipeline_pair>* mmp_map = mmp_hp ? mmp_hp :
+        quantize_y ? ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_Q8_1, (ggml_prec)dst->op_params[0]) : nullptr;
+    if (mmp_map == nullptr || mmp_hp) {
         quantize_y = false;
     }
 
-    const bool y_non_contig = (ctx->device->coopmat2 && src1->type == GGML_TYPE_F32) ||
+    const bool y_non_contig = (!mmp_hp && ctx->device->coopmat2 && src1->type == GGML_TYPE_F32) ||
                               // coopmat1: force f32->f16 conversion so the f16 B-type quant pipeline is
                               // used, but only when the int8 MMQ path above is not taken.
-                              (ctx->device->coopmat_support && !ctx->device->coopmat2 && !quantize_y &&
+                              (!mmp_hp && ctx->device->coopmat_support && !ctx->device->coopmat2 && !quantize_y &&
                                ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32) ||
                               (src0->type == GGML_TYPE_BF16 && src1->type != GGML_TYPE_BF16) ||
                               !ggml_vk_dim01_contiguous(src1);
@@ -6680,7 +6741,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
     const bool y_non_contig = !ggml_vk_dim01_contiguous(src1);
 
     const bool f16_f32_kernel = src1->type == GGML_TYPE_F32;
-    bool quantize_y = ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0 && ggml_vk_should_use_mmvq(ctx->device, ne01, ne11, ne10, src0->type);
+    bool quantize_y = !ggml_vk_mul_mat_src1_hp(dst) && ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0 && ggml_vk_should_use_mmvq(ctx->device, ne01, ne11, ne10, src0->type);
 
     vk_pipeline to_fp16_vk_0 = nullptr;
     vk_pipeline to_fp16_vk_1 = nullptr;
@@ -7393,10 +7454,14 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
 #else
     const bool y_decode_vector_staging = false;
 #endif
-    const bool y_non_contig = y_decode_vector_staging ||
-                              (ctx->device->coopmat2 && src1->type == GGML_TYPE_F32) ||
+    // [TAG_GGML_PREC] f32 src1 operands (fp32 shared memory) when the hint asks for it and the pipelines exist
+    const std::vector<vk_matmul_pipeline_pair>* mmp_hp = ctx->device->fp16 && ggml_vk_mul_mat_src1_hp(dst) && ggml_vk_dim01_contiguous(src1) && !x_non_contig
+        ? ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_F32, GGML_PREC_F32, true, true) : nullptr;
+
+    const bool y_non_contig = (!mmp_hp && y_decode_vector_staging) ||
+                              (!mmp_hp && ctx->device->coopmat2 && src1->type == GGML_TYPE_F32) ||
                               // Intel coopmat1: force f32->f16 conversion so the f16 B-type quant pipeline is used.
-                              (ctx->device->coopmat_support && !ctx->device->coopmat2 &&
+                              (!mmp_hp && ctx->device->coopmat_support && !ctx->device->coopmat2 &&
                                ctx->device->vendor_id == VK_VENDOR_ID_INTEL &&
                                ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32) ||
                               (src0->type == GGML_TYPE_BF16 && src1->type != GGML_TYPE_BF16) ||
@@ -7404,10 +7469,11 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
 
     const bool y_f32_kernel = src1->type == GGML_TYPE_F32 && !y_non_contig;
 
-    bool quantize_y = ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0;
+    bool quantize_y = !mmp_hp && !ggml_vk_mul_mat_src1_hp(dst) && ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0;
 
     // Check for mmq first
-    const std::vector<vk_matmul_pipeline_pair>* mmp_map = quantize_y ? ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_Q8_1, (ggml_prec)dst->op_params[0], true) : nullptr;
+    const std::vector<vk_matmul_pipeline_pair>* mmp_map = mmp_hp ? mmp_hp :
+        quantize_y ? ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_Q8_1, (ggml_prec)dst->op_params[0], true) : nullptr;
 
     if (mmp_map == nullptr) {
         // Fall back to f16 dequant mul mat
@@ -7718,7 +7784,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     const bool y_non_contig = !ggml_vk_dim01_contiguous(src1);
 
     const bool f16_f32_kernel = src1->type == GGML_TYPE_F32;
-    bool quantize_y = ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0 && ggml_vk_should_use_mmvq(ctx->device, ne01, ne12, ne10, src0->type);
+    bool quantize_y = !ggml_vk_mul_mat_src1_hp(dst) && ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0 && ggml_vk_should_use_mmvq(ctx->device, ne01, ne12, ne10, src0->type);
 
     vk_pipeline to_fp16_vk_0 = nullptr;
     vk_pipeline to_fp16_vk_1 = nullptr;
@@ -9123,6 +9189,16 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             return ctx->device->pipeline_rwkv_wkv7_f32;
         }
         return nullptr;
+    case GGML_OP_MAMBA3_MIMO:
+        if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_mamba3_mimo_f32;
+        }
+        return nullptr;
+    case GGML_OP_GEODESIC:
+        if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            return ctx->device->pipeline_geodesic_f32;
+        }
+        return nullptr;
     case GGML_OP_GATED_LINEAR_ATTN:
         if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
             return ctx->device->pipeline_gated_linear_attn_f32;
@@ -10117,6 +10193,85 @@ void ggml_vk_rwkv_wkv7(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_t
         },
         7
     );
+}
+
+// Olala Mamba3-MIMO, result mode (state in src[7], y and new state in dst); see ggml_mamba3_mimo
+static void ggml_vk_mamba3_mimo(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    const ggml_tensor * pdyn   = dst->src[0];
+    const ggml_tensor * pstat  = dst->src[1];
+    const ggml_tensor * mimo_o = dst->src[4];
+    const ggml_tensor * state  = dst->src[7];
+
+    GGML_ASSERT(dst->buffer != nullptr);
+    GGML_ASSERT(dst->src[8] == nullptr); // in-place mode is CPU only
+
+    vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, pdyn, pstat, nullptr, dst, dst->op);
+    GGML_ASSERT(pipeline != nullptr);
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+
+    const uint32_t D_qk  = (uint32_t) dst->src[2]->ne[0];
+    const uint32_t R     = (uint32_t) mimo_o->ne[1];
+    const uint32_t H     = (uint32_t) mimo_o->ne[2];
+    const uint32_t D_v   = (uint32_t) mimo_o->ne[0];
+    const uint32_t n_ang = D_qk/4;
+    const uint32_t n_tok = (uint32_t) pdyn->ne[1];
+    const uint32_t n_seqs = (uint32_t) state->ne[1];
+
+    const uint32_t off_K    = H*D_v*D_qk;
+    const uint32_t off_V    = off_K + H*R*D_qk;
+    const uint32_t off_A    = off_V + H*R*D_v;
+    const uint32_t n_embd_s = off_A + H*n_ang;
+
+    vk_subbuffer buf[9];
+    for (int i = 0; i < 8; ++i) {
+        buf[i] = ggml_vk_tensor_subbuffer(ctx, dst->src[i], i == 0 || i == 1 || i == 7);
+    }
+    buf[8] = ggml_vk_tensor_subbuffer(ctx, dst);
+
+    const vk_op_mamba3_mimo_push_constants pc = {
+        get_misalign_bytes(ctx, pdyn)/4,  (uint32_t) (pdyn->nb[1]/sizeof(float)),
+        get_misalign_bytes(ctx, pstat)/4, (uint32_t) (pstat->nb[1]/sizeof(float)),
+        get_misalign_bytes(ctx, state)/4, (uint32_t) (state->nb[1]/sizeof(float)),
+        D_qk, R, D_v, H, n_ang,
+        n_tok/n_seqs, n_seqs,
+        off_K, off_V, off_A, n_embd_s,
+        D_v*H*n_tok,
+        ggml_get_op_params_f32(dst, 0), ggml_get_op_params_f32(dst, 1),
+    };
+
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+        {buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8]},
+        pc, {H, n_seqs, 1});
+}
+
+// Olala geodesic residual, one workgroup per row
+static void ggml_vk_geodesic(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    const ggml_tensor * x = dst->src[0];
+    const ggml_tensor * g = dst->src[1];
+
+    GGML_ASSERT(dst->buffer != nullptr);
+    vk_pipeline pipeline = ggml_vk_op_get_pipeline(ctx, x, g, nullptr, dst, dst->op);
+    GGML_ASSERT(pipeline != nullptr);
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+
+    const uint32_t nr = (uint32_t) ggml_nrows(x);
+    const vk_op_geodesic_push_constants pc = {
+        (uint32_t) x->ne[0], (uint32_t) x->ne[1], (uint32_t) x->ne[2], nr,
+        get_misalign_bytes(ctx, x)/4,   (uint32_t) (x->nb[1]/4),   (uint32_t) (x->nb[2]/4),   (uint32_t) (x->nb[3]/4),
+        get_misalign_bytes(ctx, g)/4,   (uint32_t) (g->nb[1]/4),   (uint32_t) (g->nb[2]/4),   (uint32_t) (g->nb[3]/4),
+        get_misalign_bytes(ctx, dst)/4, (uint32_t) (dst->nb[1]/4), (uint32_t) (dst->nb[2]/4), (uint32_t) (dst->nb[3]/4),
+        ggml_get_op_params_f32(dst, 0),
+    };
+
+    const uint32_t max_x = std::min<uint32_t>(ctx->device->properties.limits.maxComputeWorkGroupCount[0], 65535);
+    const uint32_t wg_x  = std::min(nr, max_x);
+    const uint32_t wg_y  = CEIL_DIV(nr, wg_x);
+
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+        {ggml_vk_tensor_subbuffer(ctx, x, true), ggml_vk_tensor_subbuffer(ctx, g, true),
+         ggml_vk_tensor_subbuffer(ctx, dst->src[2]), ggml_vk_tensor_subbuffer(ctx, dst->src[3]),
+         ggml_vk_tensor_subbuffer(ctx, dst, true)},
+        pc, {wg_x, wg_y, 1});
 }
 
 void ggml_vk_gated_linear_attn(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
@@ -12683,6 +12838,16 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
 
     case GGML_OP_RWKV_WKV7:
         ggml_vk_rwkv_wkv7(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_MAMBA3_MIMO:
+        ggml_vk_mamba3_mimo(ctx, compute_ctx, node);
+
+        break;
+
+    case GGML_OP_GEODESIC:
+        ggml_vk_geodesic(ctx, compute_ctx, node);
 
         break;
 
@@ -15847,6 +16012,37 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_RWKV_WKV7:
             return true; // all inputs are contiguous, see ggml.c
+        case GGML_OP_MAMBA3_MIMO:
+            {
+                // result mode only (the in-place mode updates the CPU cache rows)
+                if (op->src[8] != nullptr || op->type != GGML_TYPE_F32) {
+                    return false;
+                }
+                for (int i = 0; i < 8; ++i) {
+                    if (op->src[i] == nullptr || op->src[i]->type != GGML_TYPE_F32 || op->src[i]->nb[0] != sizeof(float)) {
+                        return false;
+                    }
+                }
+                const int64_t D_qk = op->src[2]->ne[0];
+                const int64_t R    = op->src[4]->ne[1];
+                const int64_t D_v  = op->src[4]->ne[0];
+                // shader limits (mamba3_mimo.comp): 256 threads, D_v rows of 256/D_v threads,
+                // <= 64 state columns per thread, power-of-two R <= 8
+                if (D_v > 256 || 256 % D_v != 0 || D_qk > (256/D_v)*64 || D_qk % 4 != 0 || D_qk/4 > 64) {
+                    return false;
+                }
+                if (R != 1 && R != 2 && R != 4 && R != 8) {
+                    return false;
+                }
+                // shared memory of the shader: 2*1024 + 1024 + 2*512 + 512 + 3*64 + 16 + 256 + 256*8 floats
+                if (device->properties.limits.maxComputeSharedMemorySize < 7120*sizeof(float)) {
+                    return false;
+                }
+                return R*D_qk <= 1024 && R*D_v <= 512;
+            }
+        case GGML_OP_GEODESIC:
+            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                   op->src[0]->nb[0] == sizeof(float) && op->src[1]->nb[0] == sizeof(float);
         case GGML_OP_GATED_LINEAR_ATTN:
             // the shader block size is hardcoded to head_size 64
             return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 && op->src[0]->ne[0] == 64;
