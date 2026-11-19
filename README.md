@@ -1,16 +1,26 @@
-# llama.cpp — Olala 7A1B + Vulkan (AMD GPUs)
+# Olala (OVHai) on AMD GPUs with Vulkan — llama.cpp fork
+
+**Run the French LLM Olala-v1.0-mini-7A1B on an AMD Radeon GPU, without CUDA or ROCm.**
+Vulkan backend for llama.cpp, tested on an RX 6600 (8 GB) under Windows 11: **~3× faster than the CPU**,
+with an OpenAI-compatible server that works with coding agents such as opencode.
+
+**Faire tourner le LLM français Olala-v1.0-mini-7A1B sur une carte graphique AMD Radeon, sans CUDA ni ROCm.**
+Backend Vulkan pour llama.cpp, testé sur une RX 6600 (8 Go) sous Windows 11 : **environ 3× plus rapide que
+le CPU**, avec un serveur compatible OpenAI qui fonctionne avec des agents de code comme opencode.
 
 **[English](#english)** · **[Français](#français)**
 
-Fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) that runs the **Olala-v1.0-mini-7A1B** hybrid
-model (Mamba3-MIMO + differential attention + MoE) on the **Vulkan** backend, tested on an
-**AMD Radeon RX 6600 (8 GB, RDNA2)** under Windows 11.
-The original llama.cpp README is in [README-llama.cpp.md](README-llama.cpp.md).
+> Keywords / mots-clés : Olala, Olala 7A1B, OVHai, OVH, French LLM, LLM français, AMD, Radeon, RX 6600,
+> RDNA2, Vulkan, llama.cpp, GGUF, llama-server, Windows, Mamba3, MoE, local LLM, IA locale, opencode.
+
+Unofficial community port, not affiliated with OVHai. / Portage communautaire non officiel, sans lien avec
+OVHai. The original llama.cpp README is in / le README d'origine de llama.cpp est dans
+[README-llama.cpp.md](README-llama.cpp.md).
 
 ---
 
 <a id="english"></a>
-## 🇬🇧 English
+## English
 
 ### What this is
 
@@ -35,6 +45,11 @@ cards (and in principle on any Vulkan 1.3 GPU) without CUDA or ROCm.
   difference between two CPU code paths of the fork. This model amplifies floating-point noise, so
   greedy (`--temp 0`) text is sometimes identical to the CPU output and sometimes diverges at a
   near-tie token. More detail under *Known limitations*.
+- **`q8_0-safe2` also works** on the 8 GB card: 48.6 tok/s generation (one short reply measured, no full
+  benchmark), same top-1 token as the CPU on 28/28 and 101/101 positions, no NaN. With a 32k context,
+  `--fit on` keeps part of it on the CPU.
+- **Coding agents:** the 3 opencode test tasks (read a file, create and run a script, fix a bug) pass
+  on the GPU server.
 
 ### What was changed
 
@@ -57,6 +72,18 @@ only needs two model-specific ops plus standard ggml ops. The work:
   cooperative matrices (fp32 shared-memory pipelines).
 
 The CPU, Metal and CUDA paths are unchanged.
+
+**llama-server fixes** (these affect every backend, CPU included):
+- **Unique tool-call ids** (`common/chat.h`). The Olala chat template numbers tool calls `call_0`,
+  `call_1`… again in every turn. The server now always generates its own unique ids; without this,
+  opencode v2 stops with `Duplicate tool input start: call_0`.
+- **No crash when host memory runs out** (`tools/server/server-context.cpp`, `server-task.cpp`).
+  - On this hybrid model, every context checkpoint copies the Mamba state (~60 MB). With the defaults
+    (32 checkpoints, 8 GB prompt cache), memory grew from 7 to 17 GB over a few long conversations.
+  - Before, a failed allocation then killed the process on
+    `GGML_ASSERT(batch.slot_batched || batch.size() == 0)`. Now the checkpoint is skipped and the server
+    keeps running.
+  - Recommended options: `--ctx-checkpoints 8 --cache-ram 1024`.
 
 ### Requirements
 
@@ -82,7 +109,7 @@ The CPU, Metal and CUDA paths are unchanged.
 **Windows**: open *x64 Native Tools Command Prompt for VS 2022*, then:
 
 ```bat
-git clone -b vulkan-olala <this-repo-url> llama.cpp-olala-vulkan
+git clone -b vulkan-olala https://gitlab.com/kiki67100/olala-ovh-amd-vulkan.git llama.cpp-olala-vulkan
 cd llama.cpp-olala-vulkan
 cmake -B build-vk -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
 cmake --build build-vk
@@ -104,7 +131,7 @@ OpenAI-compatible server (Windows; on Linux drop the `.exe` and use `\` for line
 
 ```bat
 build-vk\bin\llama-server.exe -m Olala-v1.0-mini-7A1B-q5_k_m.gguf -ngl 99 -fa on ^
-  -ctk q8_0 -ctv q8_0 -c 32768 --host 127.0.0.1 --port 8081
+  -ctk q8_0 -ctv q8_0 -c 32768 --ctx-checkpoints 8 --cache-ram 1024 --host 127.0.0.1 --port 8081
 ```
 
 Then use `http://127.0.0.1:8081/v1` from any OpenAI-compatible client.
@@ -189,7 +216,7 @@ Full walkthrough: [docs/olala-vulkan.md](docs/olala-vulkan.md) (French).
   portable path does not use them. They would only be speed optimizations.
 - **Unexplained divergence:** on one French prompt, greedy generation differs from the CPU from the
   first token, while `olala-logits` gives the same top-1 token. Not investigated yet.
-- **`q8_0`** on 8 GB cards: not validated yet.
+- **`q8_0`** on 8 GB cards: works, but slower than `q5_k_m` (about 49 vs 80 tok/s).
 
 ### Documentation
 
@@ -200,6 +227,10 @@ Full walkthrough: [docs/olala-vulkan.md](docs/olala-vulkan.md) (French).
 | [docs/olala-vulkan.md](docs/olala-vulkan.md) | Vulkan port: build, validation, results (FR) |
 | [docs/olala-metal-testing.md](docs/olala-metal-testing.md) | Metal validation checklist |
 
+### More projects
+
+Other Olala tools and projects by the same author: **https://gitlab.com/kiki67100**
+
 ### License
 
 MIT, like llama.cpp: see [LICENSE](LICENSE). Based on [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)
@@ -209,7 +240,7 @@ not included and are covered by their own license.
 ---
 
 <a id="français"></a>
-## 🇫🇷 Français
+## Français
 
 ### De quoi s'agit-il
 
@@ -235,6 +266,11 @@ cartes AMD (et en principe sur tout GPU Vulkan 1.3), sans CUDA ni ROCm.
   entre deux chemins de calcul CPU du fork. Ce modèle amplifie le bruit flottant : en greedy
   (`--temp 0`), le texte est tantôt identique au CPU, tantôt il diverge sur un token presque à égalité.
   Voir *Limites connues*.
+- **Le `q8_0-safe2` fonctionne aussi** sur la carte de 8 Go : 48,6 tok/s en génération (une seule réponse
+  courte mesurée, pas de bench complet), même token en tête que le CPU sur 28/28 et 101/101 positions,
+  aucun NaN. Avec 32k de contexte, `--fit on` en garde une partie sur le CPU.
+- **Agents de code :** les 3 tâches de test opencode (lire un fichier, créer et exécuter un script, corriger
+  un bug) passent sur le serveur GPU.
 
 ### Ce qui a été modifié
 
@@ -257,6 +293,20 @@ Ce chemin n'a besoin que de deux ops propres au modèle, plus des ops ggml stand
   GPU sans matrices coopératives (pipelines avec mémoire partagée fp32).
 
 Les chemins CPU, Metal et CUDA ne changent pas.
+
+**Correctifs de llama-server** (ils concernent tous les backends, CPU compris) :
+- **Identifiants d'appels d'outils uniques** (`common/chat.h`). Le template de chat Olala renumérote les
+  appels `call_0`, `call_1`… à chaque tour. Le serveur génère maintenant toujours ses propres identifiants
+  uniques ; sans ça, opencode v2 s'arrête sur `Duplicate tool input start: call_0`.
+- **Plus de plantage quand la mémoire de l'hôte s'épuise** (`tools/server/server-context.cpp`,
+  `server-task.cpp`).
+  - Sur ce modèle hybride, chaque point de sauvegarde de contexte copie l'état Mamba (environ 60 Mo).
+    Avec les valeurs par défaut (32 points, 8 Go de cache de prompts), la mémoire passait de 7 à 17 Go
+    en quelques longues conversations.
+  - Avant, une allocation ratée tuait alors le processus sur
+    `GGML_ASSERT(batch.slot_batched || batch.size() == 0)`. Maintenant le point de sauvegarde est sauté
+    et le serveur continue.
+  - Options recommandées : `--ctx-checkpoints 8 --cache-ram 1024`.
 
 ### Prérequis
 
@@ -282,7 +332,7 @@ Les chemins CPU, Metal et CUDA ne changent pas.
 **Windows** : ouvrir *x64 Native Tools Command Prompt for VS 2022*, puis :
 
 ```bat
-git clone -b vulkan-olala <url-de-ce-dépôt> llama.cpp-olala-vulkan
+git clone -b vulkan-olala https://gitlab.com/kiki67100/olala-ovh-amd-vulkan.git llama.cpp-olala-vulkan
 cd llama.cpp-olala-vulkan
 cmake -B build-vk -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
 cmake --build build-vk
@@ -304,7 +354,7 @@ Serveur compatible OpenAI (Windows ; sous Linux, retirer `.exe` et utiliser `\` 
 
 ```bat
 build-vk\bin\llama-server.exe -m Olala-v1.0-mini-7A1B-q5_k_m.gguf -ngl 99 -fa on ^
-  -ctk q8_0 -ctv q8_0 -c 32768 --host 127.0.0.1 --port 8081
+  -ctk q8_0 -ctv q8_0 -c 32768 --ctx-checkpoints 8 --cache-ram 1024 --host 127.0.0.1 --port 8081
 ```
 
 Utiliser ensuite `http://127.0.0.1:8081/v1` depuis n'importe quel client compatible OpenAI.
@@ -391,7 +441,7 @@ Guide complet : [docs/olala-vulkan.md](docs/olala-vulkan.md).
   Le chemin portable ne s'en sert pas : ce ne seraient que des optimisations de vitesse.
 - **Divergence non expliquée :** sur un prompt en français, la génération greedy diffère du CPU dès le
   premier token, alors que `olala-logits` donne le même token en tête. Pas encore étudié.
-- **`q8_0`** sur une carte de 8 Go : pas encore validé.
+- **`q8_0`** sur une carte de 8 Go : fonctionne, mais plus lent que le `q5_k_m` (environ 49 contre 80 tok/s).
 
 ### Documentation
 
@@ -401,6 +451,10 @@ Guide complet : [docs/olala-vulkan.md](docs/olala-vulkan.md).
 | [docs/olala-setup.md](docs/olala-setup.md) | installation selon le matériel (CPU, Mac, NVIDIA) |
 | [docs/olala-vulkan.md](docs/olala-vulkan.md) | portage Vulkan : build, validation, résultats |
 | [docs/olala-metal-testing.md](docs/olala-metal-testing.md) | check-list de validation Metal |
+
+### Autres projets
+
+Les autres outils et projets Olala du même auteur : **https://gitlab.com/kiki67100**
 
 ### Licence
 
