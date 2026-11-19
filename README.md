@@ -109,7 +109,7 @@ The CPU, Metal and CUDA paths are unchanged.
 **Windows**: open *x64 Native Tools Command Prompt for VS 2022*, then:
 
 ```bat
-git clone -b vulkan-olala https://gitlab.com/kiki67100/olala-ovh-amd-vulkan.git llama.cpp-olala-vulkan
+git clone -b vulkan-olala https://github.com/kiki67100/olala-ovh-amd-vulkan.git llama.cpp-olala-vulkan
 cd llama.cpp-olala-vulkan
 cmake -B build-vk -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
 cmake --build build-vk
@@ -229,7 +229,7 @@ Full walkthrough: [docs/olala-vulkan.md](docs/olala-vulkan.md) (French).
 
 ### More projects
 
-Other Olala tools and projects by the same author: **https://gitlab.com/kiki67100**
+Other Olala tools and projects by the same author: **https://github.com/kiki67100**
 
 ### License
 
@@ -332,7 +332,7 @@ Les chemins CPU, Metal et CUDA ne changent pas.
 **Windows** : ouvrir *x64 Native Tools Command Prompt for VS 2022*, puis :
 
 ```bat
-git clone -b vulkan-olala https://gitlab.com/kiki67100/olala-ovh-amd-vulkan.git llama.cpp-olala-vulkan
+git clone -b vulkan-olala https://github.com/kiki67100/olala-ovh-amd-vulkan.git llama.cpp-olala-vulkan
 cd llama.cpp-olala-vulkan
 cmake -B build-vk -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
 cmake --build build-vk
@@ -454,7 +454,7 @@ Guide complet : [docs/olala-vulkan.md](docs/olala-vulkan.md).
 
 ### Autres projets
 
-Les autres outils et projets Olala du même auteur : **https://gitlab.com/kiki67100**
+Les autres outils et projets Olala du même auteur : **https://github.com/kiki67100**
 
 ### Licence
 
