@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olala Chat (Vulkan GPU)</title>
+<style>
+:root{--bg:#f6f6f4;--panel:#fff;--text:#1c1c1c;--muted:#6b6b6b;--line:#e2e2de;--accent:#3b5bdb;--user:#e8ecfb;--think:#f1f0ea;--codebg:#fafaf8}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--panel:#1f1f1f;--text:#e8e8e8;--muted:#9a9a9a;--line:#333;--accent:#7b93ff;--user:#252b42;--think:#262622;--codebg:#191919}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;height:100vh;display:flex;flex-direction:column}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0 8px 0 0}
+label{font-size:13px;color:var(--muted);display:flex;gap:6px;align-items:center}
+select,button{font:inherit;font-size:13px;padding:5px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+#status{font-size:12px;padding:3px 8px;border-radius:10px;background:var(--think)}
+#status.ready{color:#2b8a3e}#status.loading{color:#e67700}#status.error{color:#c92a2a}
+.spacer{flex:1}
+#ctx{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+main{flex:1;overflow-y:auto;padding:16px}
+.wrap{max-width:820px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.msg{padding:10px 14px;border-radius:10px;background:var(--panel);border:1px solid var(--line);white-space:pre-wrap;word-wrap:break-word}
+.msg.user{background:var(--user);align-self:flex-end;max-width:85%}
+details{background:var(--think);border-radius:8px;padding:6px 10px;margin-bottom:8px;font-size:13px;color:var(--muted)}
+details summary{cursor:pointer}
+.stats{font-size:12px;color:var(--muted);margin-top:6px;font-variant-numeric:tabular-nums}
+details{white-space:pre-wrap}
+code{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;font-size:13px}
+/* Markdown */
+.md{white-space:normal}
+.md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
+.md p,.md ul,.md ol,.md blockquote,.md table,.md .code{margin:0 0 10px}
+.md ul,.md ol{padding-left:24px}.md li{margin:2px 0}.md li>p{margin:0}
+.md h1,.md h2,.md h3,.md h4{line-height:1.3;margin:16px 0 8px}
+.md h1{font-size:20px}.md h2{font-size:18px}.md h3{font-size:16px}.md h4{font-size:15px}
+.md a{color:var(--accent)}
+.md hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+.md blockquote{border-left:3px solid var(--line);padding:2px 12px;color:var(--muted)}
+.md table{border-collapse:collapse;display:block;overflow-x:auto;max-width:100%}
+.md th,.md td{border:1px solid var(--line);padding:5px 10px;text-align:left;vertical-align:top}
+.md th{background:var(--think)}
+.md :not(pre)>code{background:var(--think);padding:1px 5px;border-radius:4px;font-size:.88em}
+.code{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--codebg)}
+.code .bar{display:flex;justify-content:space-between;align-items:center;padding:3px 6px 3px 12px;font-size:12px;color:var(--muted);background:var(--think);border-bottom:1px solid var(--line)}
+.code .bar button{font-size:12px;padding:2px 8px}
+.code pre{margin:0;padding:10px 12px;overflow-x:auto;white-space:pre;background:transparent}
+.code pre code.hljs{padding:0;background:transparent}
+footer{padding:10px 16px;border-top:1px solid var(--line);background:var(--panel)}
+footer .wrap{flex-direction:row;gap:8px}
+textarea{flex:1;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);resize:none;height:64px}
+</style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>Olala mini</h1>
+  <label>Modèle <select id="model"></select></label>
+  <label>Réflexion
+    <select id="effort">
+      <option value="disabled">disabled</option>
+      <option value="low" selected>low</option>
+      <option value="medium">medium</option>
+      <option value="high">high</option>
+    </select>
+  </label>
+  <span id="status">…</span>
+  <span class="spacer"></span>
+  <span id="ctx"></span>
+  <button id="clear">Nouvelle discussion</button>
+</header>
+<main><div class="wrap" id="chat"></div></main>
+<footer><div class="wrap">
+  <textarea id="input" placeholder="Écris ton message… (Entrée pour envoyer, Maj+Entrée pour une nouvelle ligne)"></textarea>
+  <button id="send" class="primary">Envoyer</button>
+</div></footer>
+<script>
+const $ = id => document.getElementById(id);
+let history = [], ctxMax = 32768, busy = false, ctrl = null, lastCtx = 0;
+let sess = {prompt: 0, completion: 0};
+
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function mdFallback(s){
+  return esc(s).replace(/\n/g,'<br>')
+    .replace(/```(\w*)(?:<br>)?([\s\S]*?)(```|$)/g,(_,l,c)=>'<div class="code"><pre><code>'+c.replace(/<br>/g,'\n')+'</code></pre></div>')
+    .replace(/`([^`\n]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+}
+const hasLibs = () => window.marked && window.DOMPurify;
+if (window.marked) marked.use({gfm:true, breaks:true, renderer:{
+  code(code, lang){
+    const l = (lang||'').trim().split(/\s+/)[0];
+    return `<div class="code"><div class="bar"><span>${esc(l||'code')}</span><button type="button" class="copy">Copier</button></div>`
+         + `<pre><code${l?` class="language-${esc(l)}"`:''}>${esc(code)}</code></pre></div>`;
+  }}});
+function md(s){
+  if(!hasLibs()) return '<div class="md">'+mdFallback(s)+'</div>';
+  return '<div class="md">'+DOMPurify.sanitize(marked.parse(s))+'</div>';
+}
+function highlight(root){
+  if(!window.hljs) return;
+  root.querySelectorAll('.code pre code').forEach(el=>{
+    const lang = (el.className.match(/language-([\w+#-]+)/)||[])[1];
+    try{
+      el.innerHTML = lang && hljs.getLanguage(lang)
+        ? hljs.highlight(el.textContent,{language:lang,ignoreIllegals:true}).value
+        : hljs.highlightAuto(el.textContent).value;
+      el.classList.add('hljs');
+    }catch{}
+  });
+}
+document.addEventListener('click', async e=>{
+  const b = e.target.closest('button.copy'); if(!b) return;
+  const txt = b.closest('.code').querySelector('code').textContent;
+  try{ await navigator.clipboard.writeText(txt) }catch{
+    const t=document.createElement('textarea'); t.value=txt; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  b.textContent='Copié ✓'; setTimeout(()=>b.textContent='Copier',1500);
+});
+function updCtx(){
+  $('ctx').textContent = `Contexte : ${lastCtx.toLocaleString('fr')} / ${ctxMax.toLocaleString('fr')} tokens · Session : ${sess.prompt.toLocaleString('fr')} entrée, ${sess.completion.toLocaleString('fr')} sortie`;
+}
+async function poll(){
+  try{
+    const s = await (await fetch('/api/state')).json();
+    ctxMax = s.ctx;
+    const sel = $('model');
+    if(!sel.options.length) s.models.forEach(m=>sel.add(new Option(m,m)));
+    if(document.activeElement!==sel && s.model) sel.value = s.model;
+    const st = $('status');
+    st.textContent = s.status==='ready' ? `prêt (${s.model})` : s.status==='loading' ? `chargement de ${s.model}…` : s.status;
+    st.className = s.status.startsWith('error') ? 'error' : s.status;
+    $('send').disabled = s.status!=='ready' && !busy;
+  }catch(e){$('status').textContent='serveur GUI injoignable';$('status').className='error'}
+}
+setInterval(poll,1500); poll(); updCtx();
+
+$('model').onchange = async e => {
+  await fetch('/api/model',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:e.target.value})});
+  lastCtx = 0; updCtx(); poll();
+};
+$('clear').onclick = () => { if(ctrl) ctrl.abort(); history=[]; $('chat').innerHTML=''; lastCtx=0; sess={prompt:0,completion:0}; updCtx(); };
+$('input').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()} });
+$('send').onclick = () => busy ? ctrl.abort() : send();
+
+function bubble(cls){const d=document.createElement('div');d.className='msg '+cls;$('chat').appendChild(d);return d}
+function scroll(){const m=document.querySelector('main');m.scrollTop=m.scrollHeight}
+
+async function send(){
+  const text = $('input').value.trim();
+  if(!text||busy) return;
+  $('input').value='';
+  bubble('user').textContent = text;
+  history.push({role:'user',content:text});
+  const box = bubble('assistant');
+  const effort = $('effort').value;
+  let think='', answer='', usage=null, timings=null, t0=performance.now(), tFirst=null;
+  let raf = 0, userOpen = null;               // état ouvert/fermé de la réflexion choisi par l'utilisateur
+  box.addEventListener('click', e=>{ const s=e.target.closest('summary'); if(s) userOpen = !s.parentElement.open; });
+  const render = () => {
+    const open = userOpen ?? !answer;
+    box.innerHTML = (think ? `<details${open?' open':''}><summary>Réflexion (${effort})</summary>${esc(think)}</details>` : '')
+      + md(answer || (think ? '' : '…'));
+    highlight(box);
+    scroll();
+  };
+  const schedule = () => { if(!raf) raf = requestAnimationFrame(()=>{ raf=0; render(); }); };
+  render();
+  busy = true; $('send').textContent='Stop'; $('send').disabled=false;
+  ctrl = new AbortController();
+  try{
+    const r = await fetch('/v1/chat/completions',{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messages:history,stream:true,stream_options:{include_usage:true},temperature:0.8,top_p:0.9,top_k:40,reasoning_effort:effort})});
+    if(!r.ok) throw new Error((await r.text()) || r.status);
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf='';
+    for(;;){
+      const {value,done} = await rd.read(); if(done) break;
+      buf += dec.decode(value,{stream:true});
+      let i; while((i=buf.indexOf('\n'))>=0){
+        const line = buf.slice(0,i).trim(); buf = buf.slice(i+1);
+        if(!line.startsWith('data:')) continue;
+        const d = line.slice(5).trim(); if(d==='[DONE]') continue;
+        let j; try{ j=JSON.parse(d) }catch{ continue }
+        const delta = j.choices?.[0]?.delta || {};
+        if(delta.reasoning_content){ think += delta.reasoning_content; tFirst ??= performance.now() }
+        if(delta.content){ answer += delta.content; tFirst ??= performance.now() }
+        if(j.usage) usage = j.usage;
+        if(j.timings) timings = j.timings;
+        schedule();
+      }
+    }
+    if(raf){ cancelAnimationFrame(raf); raf=0; }
+    render();
+  }catch(e){
+    if(e.name!=='AbortError') answer += `\n\n[Erreur : ${e.message}]`;
+    else answer += ' [arrêté]';
+    render();
+  }
+  busy=false; ctrl=null; $('send').textContent='Envoyer'; poll();
+  history.push({role:'assistant',content:answer});
+  const st = document.createElement('div'); st.className='stats';
+  const parts = [];
+  if(usage){
+    parts.push(`${usage.prompt_tokens} tokens entrée`, `${usage.completion_tokens} tokens sortie`);
+    lastCtx = usage.prompt_tokens + usage.completion_tokens;
+    sess.prompt += usage.prompt_tokens; sess.completion += usage.completion_tokens;
+  }
+  if(timings){
+    if(timings.predicted_per_second) parts.push(`${timings.predicted_per_second.toFixed(1)} tok/s`);
+    if(timings.prompt_per_second && timings.prompt_n) parts.push(`lecture ${timings.prompt_per_second.toFixed(0)} tok/s`);
+  }
+  if(tFirst) parts.push(`1er token ${((tFirst-t0)/1000).toFixed(1)} s`);
+  parts.push(`total ${((performance.now()-t0)/1000).toFixed(1)} s`, `${$('model').value} · ${effort}`);
+  st.textContent = parts.join(' · ');
+  box.appendChild(st); updCtx(); scroll();
+}
+</script>
+</body>
+</html>
