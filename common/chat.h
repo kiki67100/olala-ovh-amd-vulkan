@@ -104,15 +104,15 @@ struct common_chat_msg {
         return false;
     }
 
+    // Assigns the ids returned to the client. The ids written by the model are ignored: templates
+    // often number the calls of each turn from scratch (call_0, call_1, ...), so they are not unique
+    // within a conversation and clients reject the duplicates. A fresh id is generated for each new
+    // call; ids_cache keeps them stable across the partial parses of one response (streaming).
     void set_tool_call_ids(std::vector<std::string> &           ids_cache,
                            const std::function<std::string()> & gen_tool_call_id) {
         for (auto i = 0u; i < tool_calls.size(); i++) {
             if (ids_cache.size() <= i) {
-                auto id = tool_calls[i].id;
-                if (id.empty()) {
-                    id = gen_tool_call_id();
-                }
-                ids_cache.push_back(id);
+                ids_cache.push_back(gen_tool_call_id());
             }
             tool_calls[i].id = ids_cache[i];
         }

@@ -7833,6 +7833,46 @@ static void test_reasoning_effort_caps() {
     assert_supports_effort("models/templates/Qwen-Qwen3-0.6B.jinja", false);
 }
 
+// the ids returned to the client must be unique across turns (models often restart at call_0)
+// and stable across the partial parses of one streamed response
+static void test_set_tool_call_ids() {
+    LOG_DBG("%s\n", __func__);
+    int n_gen = 0;
+    auto gen = [&]() { return "gen" + std::to_string(n_gen++); };
+
+    auto make_msg = [](size_t n_calls) {
+        common_chat_msg msg;
+        msg.role = "assistant";
+        for (size_t i = 0; i < n_calls; i++) {
+            common_chat_tool_call tc;
+            tc.name = "f";
+            tc.id   = "call_" + std::to_string(i); // id written by the model
+            msg.tool_calls.push_back(tc);
+        }
+        return msg;
+    };
+
+    // response 1, streamed: 1 call, then 2 calls
+    std::vector<std::string> cache1;
+    auto m = make_msg(1);
+    m.set_tool_call_ids(cache1, gen);
+    assert_equals(std::string("gen0"), m.tool_calls[0].id);
+    m = make_msg(2);
+    m.set_tool_call_ids(cache1, gen);
+    assert_equals(std::string("gen0"), m.tool_calls[0].id);
+    assert_equals(std::string("gen1"), m.tool_calls[1].id);
+    m = make_msg(2);
+    m.set_tool_call_ids(cache1, gen);
+    assert_equals(std::string("gen1"), m.tool_calls[1].id);
+    assert_equals(2, n_gen);
+
+    // response 2: the model restarts at call_0, the client must get a new id
+    std::vector<std::string> cache2;
+    m = make_msg(1);
+    m.set_tool_call_ids(cache2, gen);
+    assert_equals(std::string("gen2"), m.tool_calls[0].id);
+}
+
 static void test_msg_diffs_compute() {
     LOG_DBG("%s\n", __func__);
     {
@@ -7984,6 +8024,7 @@ int main(int argc, char ** argv) {
 #endif
     {
         test_msg_diffs_compute();
+        test_set_tool_call_ids();
         test_msgs_oaicompat_json_conversion();
         test_msg_token_delimiters_split();
         test_tools_oaicompat_json_conversion();
