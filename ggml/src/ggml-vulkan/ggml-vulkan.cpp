@@ -15567,7 +15567,11 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                         // If there's not enough shared memory for row_ids and the result tile, fallback to CPU
                         return false;
                     }
-                    if (ggml_get_op_params_i32(op, 3) == GGML_PREC_F32) {
+                }
+                // [TAG_GGML_PREC] src1 that must stay above f16: needs the fp32 shared-memory pipelines on fp16 devices
+                if (ggml_vk_mul_mat_src1_hp(op) && device->fp16) {
+                    auto it = device->pipeline_matmul.find(vk_matmul_pipeline_key{src0_type, GGML_TYPE_F32, op->op == GGML_OP_MUL_MAT_ID, false, true});
+                    if (it == device->pipeline_matmul.end() || it->second.empty()) {
                         return false;
                     }
                 }

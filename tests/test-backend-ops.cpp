@@ -5666,6 +5666,48 @@ static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats, float amax =
     init_mul_mat_id_ids(ctx, n_mats);
 }
 
+// GGML_OP_MUL_MAT with activations beyond the f16 range and the src1 precision hint the Olala graph
+// sets on its quantized matmuls [TAG_GGML_PREC] (no f16 staging, no q8_1 with fp16 scales)
+struct test_mul_mat_src1_prec : public test_case {
+    const ggml_type type_a;
+    const int64_t m, n, k;
+    const float amax;
+    const ggml_prec prec;
+
+    std::string vars() override {
+        return VARS_TO_STR6(type_a, m, n, k, amax, prec);
+    }
+
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+
+    test_mul_mat_src1_prec(ggml_type type_a = GGML_TYPE_Q5_K, int64_t m = 256, int64_t n = 16, int64_t k = 1536,
+            float amax = 1e6f, ggml_prec prec = GGML_PREC_BF16)
+        : type_a(type_a), m(m), n(n), k(k), amax(amax), prec(prec) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_2d(ctx, type_a, k, m);
+        ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+        ggml_set_name(a, "a");
+        ggml_set_name(b, "b");
+        ggml_tensor * out = ggml_mul_mat(ctx, a, b);
+        ggml_prec_set_src(out, prec, 1);
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_F32) {
+                init_tensor_uniform(t, -amax, amax);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
 // GGML_OP_MUL_MAT_ID
 struct test_mul_mat_id : public test_case {
     const ggml_type type_a;
@@ -10936,6 +10978,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 4, 4, false, 16, 10, 256));
     }
 
+    // test src1 f16 overflow, Olala precision hint (q5_k_m files: q5_K, q6_K, q8_0 weights)
+    for (ggml_type type_a : {GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
+        for (int n : {1, 3, 16, 64}) {
+            test_cases.emplace_back(new test_mul_mat_src1_prec(type_a, 256, n, 1536, 1e6f, GGML_PREC_BF16));
+        }
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 16, 6, false, 384, 1,  256, 1e6f));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 16, 6, false, 384, 32, 256, 1e6f));
+    }
     // test src1 f16 overflow
     for (int n : {16, 32, 64}) {
         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_K, GGML_TYPE_F32, 128, 4, false, 4096, n, 2048, 1e5f));
