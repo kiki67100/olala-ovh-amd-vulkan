@@ -197,6 +197,16 @@ struct server_batch {
         return (int32_t)tokens.size();
     }
 
+    // drop the tokens added after the first n (used to roll back the tokens of a slot that failed)
+    void truncate(int32_t n) {
+        GGML_ASSERT(n >= 0 && n <= size());
+        tokens.resize(n);
+        if (has_embd) {
+            embd.resize((size_t) n * n_embd);
+            has_embd = n > 0;
+        }
+    }
+
     void set_output(int32_t idx, bool output) {
         GGML_ASSERT(idx >= 0 && idx < (int32_t)tokens.size());
         tokens[idx].output = output;
@@ -2476,10 +2486,25 @@ private:
         //       this is not true for SWA models: https://github.com/ggml-org/llama.cpp/pull/24411#issuecomment-4677983225
         cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
 
-        cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        // stash the draft's speculative state with the checkpoint
-        common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
+        try {
+            cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            // stash the draft's speculative state with the checkpoint
+            common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
+        } catch (const std::bad_alloc &) {
+            // a checkpoint is only a cache: out of host memory, drop it and the older half of the
+            // checkpoints, lower the limit and go on (a later rollback may need a full re-processing)
+            slot.prompt.checkpoints.pop_back();
+            while (slot.prompt.checkpoints.size() > 1 &&
+                   slot.prompt.checkpoints.size() > (size_t) params_base.n_ctx_checkpoints / 2) {
+                slot.prompt.checkpoints.pop_front();
+            }
+            params_base.n_ctx_checkpoints = std::max(1, (int) slot.prompt.checkpoints.size());
+            SLT_WRN(slot, "out of host memory while creating a context checkpoint, skipped; "
+                    "keeping %zu checkpoints, max lowered to %d (see --ctx-checkpoints, --cache-ram)\n",
+                    slot.prompt.checkpoints.size(), params_base.n_ctx_checkpoints);
+            return;
+        }
 
         SLT_TRC(slot,
                 "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", size = %.3f MiB)\n",
@@ -2868,6 +2893,41 @@ private:
         }
     }
 
+    // like iterate(), for the callbacks of pre_decode() that add tokens to the batch: if a slot
+    // throws, the tokens it already added are removed from the batch and its cached prompt is
+    // cleared (it may list tokens that will never be decoded), so that the other slots can go on
+    // and the batch never holds tokens of a released slot
+    template <typename T>
+    void iterate_batch(std::vector<T> & slots, std::function<void(server_slot &)> callback) {
+        for (auto & s : slots) {
+            server_slot & slot = deref_slot(s);
+            if (!slot.is_processing()) {
+                continue; // idle, or released by an earlier step of this iteration
+            }
+            const int32_t n_batch_prev = batch.size();
+            try {
+                callback(slot);
+            } catch (const std::exception & e) {
+                SLT_ERR(slot, "got exception: %s\n", e.what());
+                if (batch.size() > n_batch_prev) {
+                    SLT_WRN(slot, "removing its %d tokens from the batch\n", batch.size() - n_batch_prev);
+                    batch.truncate(n_batch_prev);
+                }
+                if (batch.slot_batched == &slot && batch.size() == 0) {
+                    batch.slot_batched = nullptr;
+                }
+                slot.i_batch = -1;
+                slot.spec_i_batch.clear();
+                send_error(slot, std::string("got exception: ") + e.what(), ERROR_TYPE_SERVER);
+                slot.release();
+                slot.prompt_clear();
+            }
+        }
+    }
+
+    static server_slot & deref_slot(server_slot & slot) { return slot; }
+    static server_slot & deref_slot(server_slot * slot) { return *slot; }
+
     void abort_all_slots(const std::string & reason) {
         for (auto & slot : slots) {
             if (slot.is_processing()) {
@@ -3219,7 +3279,7 @@ private:
         });
 
         // update the batch with the sampled/drafted tokens
-        iterate(generating, [&](server_slot & slot) {
+        iterate_batch(generating, [&](server_slot & slot) {
             slot.handle_last_sampled_token(batch);
         });
 
@@ -3234,7 +3294,7 @@ private:
         if (params_base.cont_batching || batch.size() == 0) {
             bool add_ok = true; // false means the batch is full, skip remaining slots
 
-            iterate(slots, [&](server_slot & slot) {
+            iterate_batch(slots, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
                 }

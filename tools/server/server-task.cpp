@@ -1771,10 +1771,14 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     std::vector<uint8_t> state_data_tgt;
     std::vector<uint8_t> state_data_dft;
 
+    // the checkpoints are copied too: they can be large (recurrent/hybrid models)
+    std::list<common_prompt_checkpoint> checkpoints;
+
     // check if we can allocate enough memory for the new state
     try {
         state_data_tgt.resize(state_size_tgt);
         state_data_dft.resize(state_size_dft);
+        checkpoints = prompt.checkpoints;
     } catch (const std::bad_alloc & e) {
         SRV_ERR("failed to allocate memory for prompt cache state: %s\n", e.what());
 
@@ -1790,7 +1794,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     states.push_back({
         /*.prompt =*/ {
             /*.tokens      =*/ prompt.tokens.clone(),
-            /*.checkpoints =*/ prompt.checkpoints,
+            /*.checkpoints =*/ std::move(checkpoints),
         },
         /*.data   =*/ {
             /*.main =*/ std::move(state_data_tgt),

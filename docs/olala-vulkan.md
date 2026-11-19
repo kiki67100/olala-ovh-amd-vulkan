@@ -28,8 +28,18 @@ llama-server seul, dans un `cmd` Windows :
 ```bat
 C:\olala\llama.cpp-olala-vulkan\build-vk\bin\llama-server.exe ^
   -m C:\olala\models\Olala-v1.0-mini-7A1B-q5_k_m.gguf -ngl 99 -fa on ^
-  -ctk q8_0 -ctv q8_0 -c 32768 -np 1 --cache-reuse 256 --host 127.0.0.1 --port 8081
+  -ctk q8_0 -ctv q8_0 -c 32768 -np 1 --cache-reuse 256 ^
+  --ctx-checkpoints 8 --cache-ram 1024 --host 127.0.0.1 --port 8081
 ```
+
+Mémoire hôte : chaque *context checkpoint* copie l'état récurrent Mamba (≈ 60 Mio) ; avec les
+valeurs par défaut (32 checkpoints par slot + cache de prompts de 8 Gio contenant aussi des
+checkpoints), llama-server dépasse vite 15 Go de mémoire privée et épuise la mémoire virtuelle
+(commit) de Windows quand WSL tourne aussi : `std::bad_alloc` (« bad allocation »), et le fichier
+d'échange grossit sur un C: presque plein. D'où `--ctx-checkpoints 8 --cache-ram 1024` (GUI
+comprise). Le serveur survit désormais à ce manque de mémoire (checkpoint abandonné, limite
+abaissée, requête fautive en erreur) au lieu de planter sur
+`GGML_ASSERT(batch.slot_batched || batch.size() == 0)`.
 
 Ports : 7861 (GUI Vulkan) et 8081 (llama-server Vulkan). Les ports 7860/8080 sont réservés à la GUI
 et au llama-server CPU de `~/olala` et ne sont jamais touchés.

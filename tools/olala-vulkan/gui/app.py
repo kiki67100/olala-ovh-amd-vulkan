@@ -99,6 +99,9 @@ def start_model(name):
         path, placement = MODELS[name]
         cmd = [BIN, "-m", path, *placement, "-fa", "on",
                "-ctk", "q8_0", "-ctv", "q8_0", "-c", str(CTX), "-np", "1", "--cache-reuse", "256",
+               # limits host RAM: each context checkpoint holds the recurrent state (~60 MiB) and
+               # the defaults (32 checkpoints, 8 GiB prompt cache) exhaust the Windows commit charge
+               "--ctx-checkpoints", "8", "--cache-ram", "1024",
                "--host", "127.0.0.1", "--port", str(LLAMA_PORT)]
         state["proc"] = subprocess.Popen(cmd, stdout=open(LOG, "w", encoding="utf-8"),
                                          stderr=subprocess.STDOUT,
